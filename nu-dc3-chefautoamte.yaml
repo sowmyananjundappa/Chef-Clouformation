@@ -1,0 +1,437 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Author Sowmya - Chef Automate Template, creates a Chef Automate server .
+
+Parameters:
+  # Required Parameters
+  VPC:
+    Description: Choose VPC to use
+    Type: AWS::EC2::VPC::Id
+  ChefServerSubnets:
+    Description: Provide a list of Subnet IDs for the Chef Servers (must be within the specified VPC)
+    Type: List<AWS::EC2::Subnet::Id>
+  TierSecurityGroupId:
+    Description: Select an existing Security Group in your VPC to define administrative ACLs (SSH, monitoring tools, etc) to the Chef servers
+    Type: AWS::EC2::SecurityGroup::Id
+  SSLCertificateARN:
+    Description: SSL Certficate ARN for SSL Certficate(Give IAM or ACM arn)
+    Type: String
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  TagCostCentre:
+    Description: Value of Resource TAG with key as CostCentre
+    Type: String
+  TagHostname:
+    Description: Default Hostname as it appears in the console at Name Tag
+    Type: String
+  TagName:
+    Description: Default description as it appears in the console at Name Tag.
+    Type: String
+  Email:
+    Description: Contact email for Cloudwatch notifications and instance tagging
+    Type: String
+
+  ###############################################################################
+  # Performance Settings
+  InstanceType:
+    Description: EC2 Instance type for Chef Server ChefAutomate (high-CPU recommended)
+    Default: t2.xlarge
+    Type: String
+    AllowedValues: [t2.micro, t2.small, t2.medium, t2.large, t2.xlarge, t2.2xlarge,
+      m4.large, m4.xlarge, m4.2xlarge, m4.4xlarge, m4.10xlarge, m4.16xlarge,
+      m5.large, m5.xlarge, m5.2xlarge, m5.4xlarge, m5.12xlarge, m5.24xlarge,
+      c4.large, c4.xlarge, c4.2xlarge, c4.4xlarge, c4.8xlarge,
+      c5.large, c5.xlarge, c5.2xlarge, c5.4xlarge, c5.9xlarge, c5.18xlarge]
+  MaxChefAutomateInstances:
+    Description: The maximum number of additional ChefAutomate instances to launch
+    Type: Number
+    Default: 1
+  MinChefAutomateInstances:
+    Description: The minimum number of ChefAutomate instances to launch in addition to the Bootstrap ChefAutomate
+    Type: Number
+    Default: 1
+  ###############################################################################
+  # Package Versions & Locations
+  ChefAutoamtePackage:
+    Description: The URL to the chef server EL7 (chef-Auotmate-core) package which will be downloaded
+    Type: String
+    Default: 'https://packages.chef.io/files/stable/automate/1.8.68/el/7/automate-1.8.68-1.el7.x86_64.rpm'
+  ChefDkPackage:
+    Description: The URL to the chef development tool kit package which will be downloaded
+    Type: String
+    Default: 'https://packages.chef.io/files/stable/chefdk/3.0.36/el/7/chefdk-3.0.36-1.el7.x86_64.rpm'
+  ChefServerURL:
+    Description: The URL to the Enterprise chef server which we need to connect
+    Type: String
+    Default: ''
+  ###############################################################################
+  # Security Settings
+  LoadBalancerScheme:
+    Description: Network Scheme for the ELB
+    Type: String
+    Default: internet-facing
+    AllowedValues:
+    - 'internet-facing'
+    - 'internal'
+  LoadBalancerSecurityGroupId:
+    Description: Supply a security group for your load balancer (leave blank to have it created for you). Using the default security group is recommended.
+    Type: String
+    Default: ''
+  ChefAutomatesecurityGroupId:
+    Description: Supply a security group for your chef ChefAutomate (leave blank to have it created for you). Using the default security group is recommended.
+    Type: String
+    Default: ''
+  ChefServerIamRole:
+    Description: Supply an IAM Role for the Chef Servers (leave blank to have it created for you). NOTE If you supply your own role, you must also provide an S3 Bucket which that role can access
+    Type: String
+    Default: ''
+  ChefSecretsBucket:
+    Description: Supply an S3 Bucket name for the Chef Servers to read/write config files to (leave blank to have it created for you)
+    Type: String
+    Default: 'deployment-prod.s3.news.co.uk'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Required Parameters"
+        Parameters:
+          - VPC
+          - ChefServerSubnets
+          - SSLCertificateARN
+          - TierSecurityGroupId
+          - KeyName
+          - TagServiceOwner
+          - TagServiceManager
+          - Email
+          - TagHostname
+          - TagName
+          - TagShutDownTime
+          - TagCostCentre
+      - Label:
+          default: "Performance Settings"
+        Parameters:
+          - InstanceType
+          - MaxChefAutomateInstances
+          - MinChefAutomateInstances
+      - Label:
+          default: "Package Versions & Locations"
+        Parameters:
+          - ChefAutoamtePackage
+          - ChefDkPackage
+          - ChefServerURL
+          - AfterScriptLocation
+      - Label:
+          default: "Security Settings"
+        Parameters:
+          - LoadBalancerScheme
+          - LoadBalancerSecurityGroupId
+          - ChefAutomatesecurityGroupId
+          - ChefSecretsBucket
+
+Conditions:
+  CreateChefServerIamRole:
+    !Equals [ !Ref ChefServerIamRole, '' ]
+  CreateChefAutomateecurityGroup:
+    !Equals [ !Ref ChefAutomatesecurityGroupId, '' ]
+  CreateLoadBalancerSecurityGroup:
+    !Equals [ !Ref LoadBalancerSecurityGroupId, '' ]
+
+# NOTE: If you wish to replace this AMI with your own RHEL-ish variety, be prepared to
+# - have the `aws` & `cfn-init` tools preinstalled
+# - Install and enable NTP
+# - Support upstart as the init system, or else rewrite the below aws-signing-proxy service defitinion into systemd
+Mappings:
+  AWSRegion2AMI:
+    ap-south-1:
+      AMI: ami-b46f48db
+    eu-west-3:
+      AMI: ami-cae150b7
+    eu-west-2:
+      AMI: ami-c12dcda6
+    eu-west-1:
+      AMI: ami-4c457735
+    ap-northeast-2:
+      AMI: ami-efaf0181
+    ap-northeast-1:
+      AMI: ami-28ddc154
+    sa-east-1:
+      AMI: ami-f09dcc9c
+    ca-central-1:
+      AMI: ami-2f39bf4b
+    ap-southeast-1:
+      AMI: ami-64260718
+    ap-southeast-2:
+      AMI: ami-60a26a02
+    eu-central-1:
+      AMI: ami-1b316af0
+    us-east-1:
+      AMI: ami-467ca739
+    us-east-2:
+      AMI: ami-976152f2
+    us-west-1:
+      AMI: ami-46e1f226
+    us-west-2:
+      AMI: ami-6b8cef13
+
+Resources:
+# ChefAutomate Autoscale Groups
+#########################################################################################
+# The first chef server we launch is the 'bootstrap' which needs to come up first and set schema before the rest
+  AlertNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint:
+            !Ref Email
+          Protocol: email
+
+  ChefAutomateAutoScaleGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref ServerLaunchConfig
+      TargetGroupARNs:
+      - !Ref ChefTargetGroup
+      LoadBalancerNames:
+      - !Ref ChefAELB
+      MaxSize: !Sub '${MaxChefAutomateInstances}'
+      MinSize: !Sub '${MinChefAutomateInstances}'
+      NotificationConfigurations:
+      - TopicARN: !Ref AlertNotificationTopic
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_LAUNCH
+        - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+        - autoscaling:EC2_INSTANCE_TERMINATE
+        - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-ChefAutomate
+        PropagateAtLaunch: true
+      - Key: SupportTeam
+        Value: !Ref Email
+        PropagateAtLaunch: true
+        PropagateAtLaunch: true
+      - Key: TagHostname
+        Value: !Ref TagHostname
+        PropagateAtLaunch: true
+      - Key: TagName
+        Value: !Ref TagName
+        PropagateAtLaunch: true
+      VPCZoneIdentifier: !Ref ChefServerSubnets
+
+  ChefAutomateAutoScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref ChefAutomateAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: 1
+
+  ChefAutomateAutoScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref ChefAutomateAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: -1
+
+  ChefInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+      - !If [CreateChefServerIamRole, !Ref ChefRole, !Ref ChefServerIamRole]
+
+  ChefRole:
+    Condition: CreateChefServerIamRole
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+
+  RolePolicies:
+    Condition: CreateChefServerIamRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-ChefServer-Policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        # Allow ability to list all buckets
+        - Action: s3:*
+          Effect: Allow
+          Resource: arn:aws:s3:::*
+        # Allow instances to set themselves as unhealthy if one of the scripts fail
+        - Action: autoscaling:*
+          Effect: Allow
+          Resource: "*"
+        # Allow instances to read their own tags (needed for setup script below)
+        - Action: ec2:DescribeTags
+          Effect: Allow
+          Resource: "*"
+      Roles:
+      - !Ref ChefRole
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateLoadBalancerSecurityGroup
+    Properties:
+      GroupDescription: Setup Ingress/Egress for Chef Frontend Load Balancer
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/8
+        FromPort: '0'
+        IpProtocol: tcp
+        ToPort: '65535'
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/8
+        FromPort: '80'
+        IpProtocol: tcp
+        ToPort: '80'
+      - CidrIp: 0.0.0.0/8
+        FromPort: '443'
+        IpProtocol: tcp
+        ToPort: '443'
+      - FromPort: '8989'
+        IpProtocol: tcp
+        CidrIp: 0.0.0.0/8
+        ToPort: '8989'
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-ELB-SG
+      VpcId: !Ref VPC
+
+  # A special ELB just for Push Jobs traffic (TCP ports 10000-10003)
+  # Note: Push Jobs server isn't truly HA. Although job state is stored in the database,
+  #       all node state is stored ONLY in memory. Therefore we can only have 1
+  #       active push jobs server at a time. An elegant solution for this in AWS
+  #       is to have all Push Jobs traffic only routed to the BootStrap ASG
+  ChefAELB:
+    Type: "AWS::ElasticLoadBalancing::LoadBalancer"
+    Properties:
+      SecurityGroups:
+        - !If [CreateLoadBalancerSecurityGroup, !Ref LoadBalancerSecurityGroup, !Ref LoadBalancerSecurityGroupId]
+      Subnets: !Ref ChefServerSubnets
+      Scheme: !Ref LoadBalancerScheme
+      Listeners:
+        - LoadBalancerPort: '443'
+          InstancePort: '443'
+          Protocol: HTTPS
+          SSLCertificateId: !Ref SSLCertificateARN
+          InstanceProtocol: HTTPS
+        - LoadBalancerPort: '80'
+          InstancePort: '80'
+          Protocol: TCP
+        - LoadBalancerPort: '8989'
+          InstancePort: '8989'
+          Protocol: TCP
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-pushjobs-lb
+        - Key: SupportTeam
+          Value: !Ref Email
+        - Key: Hostname
+          Value: !Ref TagHostname
+        - Key: Name
+          Value: !Ref TagName
+
+  ChefTargetGroup:
+      Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+      Properties:
+        HealthCheckIntervalSeconds: 60
+        UnhealthyThresholdCount: 10
+        HealthCheckPath: /_status
+        VpcId: !Ref VPC
+        Port: 443
+        Protocol: HTTPS
+        TargetGroupAttributes:
+          - Key: stickiness.enabled
+            Value: true
+          - Key: stickiness.type
+            Value: lb_cookie
+        Tags:
+          - Key: SupportTeam
+            Value: !Ref Email
+
+  ChefAutomateecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateChefAutomateecurityGroup
+    Properties:
+      GroupDescription: Setup Ingress/Egress for Chef ChefAutomate
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '0'
+        IpProtocol: tcp
+        ToPort: '65535'
+      SecurityGroupIngress:
+      - FromPort: '80'
+        IpProtocol: tcp
+        ToPort: '80'
+      - FromPort: '443'
+        IpProtocol: tcp
+        ToPort: '443'
+      - FromPort: '10000'
+        IpProtocol: tcp
+        ToPort: '10003'
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-FE-SG
+      VpcId: !Ref VPC
+
+  ServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeSize: 50
+          VolumeType: gp2
+          DeleteOnTermination: true
+      IamInstanceProfile: !Ref ChefInstanceProfile
+      ImageId: !FindInMap
+        - AWSRegion2AMI
+        - !Ref AWS::Region
+        - AMI
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups:
+      - !If [CreateChefAutomateecurityGroup, !Ref ChefAutomateecurityGroup, !Ref ChefAutomatesecurityGroupId]
+      - !Ref TierSecurityGroupId
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash -x
+            yum install awscli -y
+            yum -y install python-pip
+            curl "https://bootstrap.pypa.io/get-pip.py" -o "get-pip.py"
+            python get-pip.py
+            pip install --upgrade s3transfer
+            pip install --upgrade awscli
+            # Install Python add-ons:
+            sudo pip install pystache
+            sudo pip install argparse
+            sudo pip install python-daemon
+            sudo pip install requests
+            hostname hostname of your server
+            cd /etc/sysconfig/
+            echo "HOSTNAME=hostname of your server" >> network
+            ip=`curl http://169.254.169.254/latest/meta-data/local-ipv4`
+            echo $ip hostname of your server /etc/hosts
+            mkdir -p /etc/delivery/
+            cd /etc/delivery/
+            aws s3 cp "delivery pem key" /etc/delivery/delivery.pem
+            cd root/
+            aws s3 cp "license key" /root/automate.license
+            aws s3 cp "afterscript script if you have any" /root/autoscript.sh
+            yum -y install dos2unix
+            dos2unix /root/autoscript.sh
+            bash -x /root/autoscript.sh ${ChefServerURL}> autolog.txt
+#Output of Chef Automate
+
+Outputs: {}

@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Author Sowmya Nanjundappa - Chef Runner Template, creates three runner server's.
+
+Parameters:
+  # Required Parameters
+  VPC:
+    Description: Choose VPC to use
+    Type: AWS::EC2::VPC::Id
+  ChefServerSubnets:
+    Description: Provide a list of Subnet IDs for the Chef Servers (must be within the specified VPC)
+    Type: List<AWS::EC2::Subnet::Id>
+  TierSecurityGroupId:
+    Description: Select an existing Security Group in your VPC to define administrative ACLs (SSH, monitoring tools, etc) to the Chef servers
+    Type: AWS::EC2::SecurityGroup::Id
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  TagCostCentre:
+    Description: Value of Resource TAG with key as CostCentre
+    Type: String
+  TagHostname:
+    Description: Default Hostname as it appears in the console at Name Tag
+    Type: String
+  TagName:
+    Description: Default description as it appears in the console at Name Tag.
+    Type: String
+  TagShutDownTime:
+    Description: This value must be a valid value in UTC time format. i.e. 19:00 for 7pm. This tag is used to specify when the service is shutdown. If the instance is up 24/7 then use the value of 0.
+    Default: '0'
+    Type: String
+  TagSupportTeam:
+    Description: Contact email for Cloudwatch notifications and instance tagging
+    Type: String
+
+  ###############################################################################
+  # Performance Settings
+  InstanceType:
+    Description: EC2 Instance type for Chef Server ChefRunners (high-CPU recommended)
+    Default: t2.micro
+    Type: String
+    AllowedValues: [t2.micro, t2.small, t2.medium, t2.large, t2.xlarge, t2.2xlarge,
+      m4.large, m4.xlarge, m4.2xlarge, m4.4xlarge, m4.10xlarge, m4.16xlarge,
+      m5.large, m5.xlarge, m5.2xlarge, m5.4xlarge, m5.12xlarge, m5.24xlarge,
+      c4.large, c4.xlarge, c4.2xlarge, c4.4xlarge, c4.8xlarge,
+      c5.large, c5.xlarge, c5.2xlarge, c5.4xlarge, c5.9xlarge, c5.18xlarge]
+  MaxChefRunnerInstances:
+    Description: The maximum number of additional ChefRunner instances to launch
+    Type: Number
+    Default: 3
+  MinChefRunnerInstances:
+    Description: The minimum number of ChefRunner instances to launch in addition to the Bootstrap ChefRunner
+    Type: Number
+    Default: 3
+  ###############################################################################
+  # Security Settings
+  ChefRunnerSecurityGroupId:
+    Description: Supply a security group for your chef ChefRunners (leave blank to have it created for you). Using the default security group is recommended.
+    Type: String
+    Default: ''
+  ChefServerIamRole:
+    Description: Supply an IAM Role for the Chef Servers (leave blank to have it created for you). NOTE If you supply your own role, you must also provide an S3 Bucket which that role can access
+    Type: String
+    Default: ''
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Required Parameters"
+        Parameters:
+          - VPC
+          - ChefServerSubnets
+          - TierSecurityGroupId
+          - KeyName
+          - TagHostname
+          - TagName
+      - Label:
+          default: "Performance Settings"
+        Parameters:
+          - InstanceType
+          - MaxChefRunnerInstances
+          - MinChefRunnerInstances
+      - Label:
+          default: "Security Settings"
+        Parameters:
+          - ChefRunnerSecurityGroupId
+
+
+Conditions:
+  CreateChefServerIamRole:
+    !Equals [ !Ref ChefServerIamRole, '' ]
+  CreateChefRunnerSecurityGroup:
+    !Equals [ !Ref ChefRunnerSecurityGroupId, '' ]
+
+# NOTE: If you wish to replace this AMI with your own RHEL-ish variety, be prepared to
+# - have the `aws` & `cfn-init` tools preinstalled
+# - Install and enable NTP
+# - Support upstart as the init system, or else rewrite the below aws-signing-proxy service defitinion into systemd
+Mappings:
+  AWSRegion2AMI:
+    ap-south-1:
+      AMI: ami-b46f48db
+    eu-west-3:
+      AMI: ami-cae150b7
+    eu-west-2:
+      AMI: ami-c12dcda6
+    eu-west-1:
+      AMI: ami-4c457735
+    ap-northeast-2:
+      AMI: ami-efaf0181
+    ap-northeast-1:
+      AMI: ami-28ddc154
+    sa-east-1:
+      AMI: ami-f09dcc9c
+    ca-central-1:
+      AMI: ami-2f39bf4b
+    ap-southeast-1:
+      AMI: ami-64260718
+    ap-southeast-2:
+      AMI: ami-60a26a02
+    eu-central-1:
+      AMI: ami-1b316af0
+    us-east-1:
+      AMI: ami-467ca739
+    us-east-2:
+      AMI: ami-976152f2
+    us-west-1:
+      AMI: ami-46e1f226
+    us-west-2:
+      AMI: ami-6b8cef13
+
+Resources:
+# ChefRunner Autoscale Groups
+#########################################################################################
+# The first chef server we launch is the 'bootstrap' which needs to come up first and set schema before the rest
+  AlertNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint:
+            !Ref TagSupportTeam
+          Protocol: email
+
+  ChefRunnerAutoScaleGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref ServerLaunchConfig
+      MaxSize: !Sub '${MaxChefRunnerInstances}'
+      MinSize: !Sub '${MinChefRunnerInstances}'
+      NotificationConfigurations:
+      - TopicARN: !Ref AlertNotificationTopic
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_LAUNCH
+        - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+        - autoscaling:EC2_INSTANCE_TERMINATE
+        - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-ChefRunner
+        PropagateAtLaunch: true
+      - Key: SupportTeam
+        Value: !Ref TagSupportTeam
+        PropagateAtLaunch: true
+      - Key: ServiceOwner
+        Value: !Ref TagServiceOwner
+        PropagateAtLaunch: true
+      - Key: ServiceManager
+        Value: !Ref TagServiceManager
+        PropagateAtLaunch: true
+      - Key: TagHostname
+        Value: !Ref TagHostname
+        PropagateAtLaunch: true
+      - Key: TagName
+        Value: !Ref TagName
+        PropagateAtLaunch: true
+      - Key: TagShutDownTime
+        Value: !Ref TagShutDownTime
+        PropagateAtLaunch: true
+      VPCZoneIdentifier: !Ref ChefServerSubnets
+
+  ChefRunnerAutoScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref ChefRunnerAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: 1
+
+  ChefRunnerAutoScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref ChefRunnerAutoScaleGroup
+      Cooldown: 60
+      ScalingAdjustment: -1
+
+  ChefInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+      - !If [CreateChefServerIamRole, !Ref ChefRole, !Ref ChefServerIamRole]
+
+  ChefRole:
+    Condition: CreateChefServerIamRole
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+
+  RolePolicies:
+    Condition: CreateChefServerIamRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-ChefServer-Policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        # Allow ability to list all buckets
+        - Action: s3:List*
+          Effect: Allow
+          Resource: arn:aws:s3:::*
+        # Allow instances to set themselves as unhealthy if one of the scripts fail
+        - Action: autoscaling:*
+          Effect: Allow
+          Resource: "*"
+        # Allow instances to read their own tags (needed for setup script below)
+        - Action: ec2:DescribeTags
+          Effect: Allow
+          Resource: "*"
+      Roles:
+      - !Ref ChefRole
+
+  ChefRunnerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateChefRunnerSecurityGroup
+    Properties:
+      GroupDescription: Setup Ingress/Egress for Chef ChefRunner
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '0'
+        IpProtocol: tcp
+        ToPort: '65535'
+      SecurityGroupIngress:
+      - FromPort: '80'
+        IpProtocol: tcp
+        ToPort: '80'
+      - FromPort: '443'
+        IpProtocol: tcp
+        ToPort: '443'
+      - FromPort: '10000'
+        IpProtocol: tcp
+        ToPort: '10003'
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-FE-SG
+      VpcId: !Ref VPC
+
+  ServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeSize: 50
+          VolumeType: gp2
+          DeleteOnTermination: true
+      IamInstanceProfile: !Ref ChefInstanceProfile
+      ImageId: !FindInMap
+        - AWSRegion2AMI
+        - !Ref AWS::Region
+        - AMI
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups:
+      - !If [CreateChefRunnerSecurityGroup, !Ref ChefRunnerSecurityGroup, !Ref ChefRunnerSecurityGroupId]
+      - !Ref TierSecurityGroupId
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash -x
+            yum install awscli -y
+            yum -y install python-pip
+            curl "https://bootstrap.pypa.io/get-pip.py" -o "get-pip.py"
+            python get-pip.py
+            pip install --upgrade s3transfer
+            pip install --upgrade awscli
+            # Install Python add-ons:
+            sudo pip install pystache
+            sudo pip install argparse
+            sudo pip install python-daemon
+            sudo pip install requests
+
+#Output of Chef Runners
+
+Outputs: {}
